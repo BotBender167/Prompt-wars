@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 
 interface RouteParams {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }
 
 /**
@@ -17,7 +17,7 @@ export async function DELETE(
   req: NextRequest,
   { params }: RouteParams
 ): Promise<NextResponse> {
-  const { id } = params;
+  const { id } = await params;
 
   if (!id) {
     return NextResponse.json({ error: "Beacon id is required" }, { status: 400 });

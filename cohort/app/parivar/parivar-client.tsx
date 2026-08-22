@@ -118,13 +118,27 @@ export function ParivarClient({ domains, departments }: ParivarClientProps) {
   );
 
   useEffect(() => {
-    const stored = getProfileId();
-    setId(stored);
-    if (!stored) {
-      setIsLoading(false);
-      return;
+    let cancelled = false;
+
+    async function loadStoredProfile() {
+      await Promise.resolve();
+      if (cancelled) return;
+
+      const stored = getProfileId();
+      setId(stored);
+      if (stored) {
+        await loadProfile(stored);
+      }
+      if (!cancelled) {
+        setIsLoading(false);
+      }
     }
-    loadProfile(stored).finally(() => setIsLoading(false));
+
+    void loadStoredProfile();
+
+    return () => {
+      cancelled = true;
+    };
   }, [loadProfile]);
 
   const toggleInterest = (domain: string) => {

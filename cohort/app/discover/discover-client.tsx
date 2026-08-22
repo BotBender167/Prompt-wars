@@ -106,7 +106,20 @@ export function DiscoverClient({ domains, departments }: DiscoverClientProps) {
   );
 
   useEffect(() => {
-    fetchResults("", "", searchParams.getAll("interests"));
+    let cancelled = false;
+
+    async function loadInitialResults() {
+      await Promise.resolve();
+      if (!cancelled) {
+        await fetchResults("", "", searchParams.getAll("interests"));
+      }
+    }
+
+    void loadInitialResults();
+
+    return () => {
+      cancelled = true;
+    };
     // Mount-only: every later fetch is driven by the filter handlers below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

@@ -4,7 +4,7 @@ import { fetchGitHubProfile } from "@/lib/providers/github";
 import { fetchCodeforcesProfile } from "@/lib/providers/codeforces";
 
 interface RouteParams {
-  params: { profileId: string };
+  params: Promise<{ profileId: string }>;
 }
 
 /**
@@ -23,7 +23,7 @@ export async function POST(
   _req: NextRequest,
   { params }: RouteParams
 ): Promise<NextResponse> {
-  const { profileId } = params;
+  const { profileId } = await params;
 
   if (!profileId) {
     return NextResponse.json(

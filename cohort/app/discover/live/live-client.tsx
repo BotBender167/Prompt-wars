@@ -68,7 +68,20 @@ export function LiveClient() {
   }, []);
 
   useEffect(() => {
-    fetchBeacons();
+    let cancelled = false;
+
+    async function loadInitialBeacons() {
+      await Promise.resolve();
+      if (!cancelled) {
+        await fetchBeacons();
+      }
+    }
+
+    void loadInitialBeacons();
+
+    return () => {
+      cancelled = true;
+    };
   }, [fetchBeacons]);
 
   const locationBeacons = beacons.filter((b) => b.location_name === selectedLocation);
