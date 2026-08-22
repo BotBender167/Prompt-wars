@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { INSTITUTION_NAME, DEPARTMENTS } from "@/lib/campus";
+import { guardApiRequest } from "@/lib/api-security";
+import {
+  createProfileSession,
+  getAuthenticatedProfileId,
+  setProfileSessionCookie,
+} from "@/lib/session";
+import { isUuid, normalizeInterests, nullableText } from "@/lib/validation";
 
 /**
  * Profile read/write for the Parivar tab.
@@ -9,8 +16,8 @@ import { INSTITUTION_NAME, DEPARTMENTS } from "@/lib/campus";
  *                                evidence (raw counts only — no scores, Rule 3)
  * PUT  /api/profile            → create or update a profile and its interests
  *
- * There is no auth session yet, so PUT trusts the `id` in the body when one is
- * supplied. That is a real hole — see lib/profile-id.ts.
+ * Profile ownership is bound to a hashed server-side session referenced by an
+ * HttpOnly cookie. The local profile id is only a UI pointer, not authority.
  */
 
 interface ProfileBody {
@@ -26,18 +33,13 @@ interface ProfileBody {
   codeforces_handle?: string | null;
 }
 
-/** Trim to null so empty form fields clear the column instead of storing "". */
-function nullableText(value: unknown, max: number): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  return trimmed.slice(0, max);
-}
-
 export async function GET(req: NextRequest): Promise<NextResponse> {
+  const guarded = guardApiRequest(req, { limit: 60 });
+  if (guarded) return guarded;
+
   const id = req.nextUrl.searchParams.get("id");
-  if (!id) {
-    return NextResponse.json({ error: "id is required" }, { status: 400 });
+  if (!isUuid(id)) {
+    return NextResponse.json({ error: "id must be a valid UUID" }, { status: 400 });
   }
 
   const supabase = createServerClient();
@@ -55,10 +57,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     .maybeSingle();
 
   if (error) {
-    return NextResponse.json(
-      { error: `Database error: ${error.message}` },
-      { status: 500 }
-    );
+    console.error("Failed to load profile", error);
+    return NextResponse.json({ error: "Failed to load profile" }, { status: 500 });
   }
   if (!data) {
     return NextResponse.json({ error: "Profile not found" }, { status: 404 });
@@ -80,6 +80,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 }
 
 export async function PUT(req: NextRequest): Promise<NextResponse> {
+  const guarded = guardApiRequest(req, { limit: 20, requireSameOrigin: true });
+  if (guarded) return guarded;
+
   let body: ProfileBody;
   try {
     body = (await req.json()) as ProfileBody;
@@ -115,17 +118,22 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     year = n;
   }
 
-  const interests = Array.isArray(body.interests)
-    ? Array.from(
-        new Set(
-          body.interests.filter(
-            (s): s is string => typeof s === "string" && s.trim().length > 0
-          )
-        )
-      )
-    : [];
+  const interests = normalizeInterests(body.interests, 40, 80);
 
   const supabase = createServerClient();
+  const requestedId = body.id ?? null;
+  if (requestedId !== null && !isUuid(requestedId)) {
+    return NextResponse.json({ error: "id must be a valid UUID" }, { status: 400 });
+  }
+
+  const authenticatedProfileId = await getAuthenticatedProfileId(req, supabase);
+  if (requestedId && authenticatedProfileId && requestedId !== authenticatedProfileId) {
+    return NextResponse.json({ error: "Forbidden profile" }, { status: 403 });
+  }
+
+  // A stale localStorage id without its matching HttpOnly cookie creates a new
+  // profile. It can never be used to take over the referenced profile.
+  const existingId = requestedId === authenticatedProfileId ? requestedId : null;
 
   // Every profile belongs to the seeded institution — discover and beacons both
   // inner-join on it, so a profile without it would be invisible everywhere.
@@ -136,8 +144,9 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     .maybeSingle();
 
   if (!institution) {
+    console.error("Institution seed is missing");
     return NextResponse.json(
-      { error: "Institution not seeded — run supabase/migrations/0003_phase3.sql" },
+      { error: "Profile service is unavailable" },
       { status: 500 }
     );
   }
@@ -154,8 +163,6 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     institution_id: institution.id,
   };
 
-  const existingId = nullableText(body.id, 36);
-
   const { data: profile, error: writeError } = existingId
     ? await supabase
         .from("profiles")
@@ -166,10 +173,8 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     : await supabase.from("profiles").insert(fields).select("id").single();
 
   if (writeError || !profile) {
-    return NextResponse.json(
-      { error: `Failed to save profile: ${writeError?.message ?? "unknown error"}` },
-      { status: 500 }
-    );
+    console.error("Failed to save profile", writeError);
+    return NextResponse.json({ error: "Failed to save profile" }, { status: 500 });
   }
 
   // Replace the interest set. Names come from the domains table, so an unknown
@@ -180,10 +185,9 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     .eq("profile_id", profile.id);
 
   if (clearError) {
-    return NextResponse.json(
-      { error: `Failed to update interests: ${clearError.message}` },
-      { status: 500 }
-    );
+    console.error("Failed to clear profile interests", clearError);
+    if (!existingId) await supabase.from("profiles").delete().eq("id", profile.id);
+    return NextResponse.json({ error: "Failed to save profile" }, { status: 500 });
   }
 
   if (interests.length > 0) {
@@ -197,13 +201,22 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
         domains.map((d) => ({ profile_id: profile.id, domain_id: d.id }))
       );
       if (linkError) {
-        return NextResponse.json(
-          { error: `Failed to update interests: ${linkError.message}` },
-          { status: 500 }
-        );
+        console.error("Failed to link profile interests", linkError);
+        if (!existingId) await supabase.from("profiles").delete().eq("id", profile.id);
+        return NextResponse.json({ error: "Failed to save profile" }, { status: 500 });
       }
     }
   }
 
-  return NextResponse.json({ id: profile.id });
+  const response = NextResponse.json({ id: profile.id });
+  if (!existingId) {
+    const token = await createProfileSession(supabase, profile.id);
+    if (!token) {
+      await supabase.from("profiles").delete().eq("id", profile.id);
+      return NextResponse.json({ error: "Failed to save profile" }, { status: 500 });
+    }
+    setProfileSessionCookie(response, token);
+  }
+
+  return response;
 }

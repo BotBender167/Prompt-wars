@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { fetchGitHubProfile } from "@/lib/providers/github";
 import { fetchCodeforcesProfile } from "@/lib/providers/codeforces";
+import { guardApiRequest } from "@/lib/api-security";
+import { getAuthenticatedProfileId } from "@/lib/session";
+import { isUuid } from "@/lib/validation";
 
 interface RouteParams {
   params: Promise<{ profileId: string }>;
@@ -20,19 +23,29 @@ interface RouteParams {
  * All external API calls delegated to /lib/providers/* (Rule 4).
  */
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: RouteParams
 ): Promise<NextResponse> {
+  const guarded = guardApiRequest(req, { limit: 10, requireSameOrigin: true });
+  if (guarded) return guarded;
+
   const { profileId } = await params;
 
-  if (!profileId) {
+  if (!isUuid(profileId)) {
     return NextResponse.json(
-      { error: "profileId is required" },
+      { error: "profileId must be a valid UUID" },
       { status: 400 }
     );
   }
 
   const supabase = createServerClient();
+  const authenticatedProfileId = await getAuthenticatedProfileId(req, supabase);
+  if (!authenticatedProfileId) {
+    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+  }
+  if (authenticatedProfileId !== profileId) {
+    return NextResponse.json({ error: "Forbidden profile" }, { status: 403 });
+  }
 
   // ── Load the profile to get handles ───────────────────────────────────────
   const { data: profile, error: profileError } = await supabase

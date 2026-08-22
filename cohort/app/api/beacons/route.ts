@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { INSTITUTION_NAME } from "@/lib/campus";
+import { guardApiRequest } from "@/lib/api-security";
+import { getAuthenticatedProfileId } from "@/lib/session";
+import { isUuid, nullableText, parsePositiveInteger } from "@/lib/validation";
 
 // ── Privacy threshold ──────────────────────────────────────────────────────
 // If fewer than 3 people are at a location, the API must NOT reveal the real
@@ -10,7 +13,10 @@ const FEW_MEMBERS_LABEL = "A few members";
 
 // ── GET — list active beacons (available_until > now) ─────────────────────
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(req: NextRequest): Promise<NextResponse> {
+  const guarded = guardApiRequest(req, { limit: 120 });
+  if (guarded) return guarded;
+
   const supabase = createServerClient();
 
   const { data: beacons, error } = await supabase
@@ -28,10 +34,8 @@ export async function GET(): Promise<NextResponse> {
     .order("available_until", { ascending: true });
 
   if (error) {
-    return NextResponse.json(
-      { error: `Database error: ${error.message}` },
-      { status: 500 }
-    );
+    console.error("Failed to load beacons", error);
+    return NextResponse.json({ error: "Failed to load beacons" }, { status: 500 });
   }
 
   // Group by location to apply presence anonymisation
@@ -86,6 +90,9 @@ interface CreateBeaconBody {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const guarded = guardApiRequest(req, { limit: 20, requireSameOrigin: true });
+  if (guarded) return guarded;
+
   let body: CreateBeaconBody;
   try {
     body = (await req.json()) as CreateBeaconBody;
@@ -93,29 +100,36 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { profile_id, location_name, available_minutes } = body;
+  const { profile_id } = body;
+  const location_name = nullableText(body.location_name, 120);
+  const available_minutes = parsePositiveInteger(body.available_minutes, 1440);
 
-  if (!profile_id || typeof profile_id !== "string") {
+  if (!isUuid(profile_id)) {
     return NextResponse.json(
-      { error: "profile_id is required" },
+      { error: "profile_id must be a valid UUID" },
       { status: 400 }
     );
   }
-  if (!location_name || typeof location_name !== "string") {
+  if (!location_name) {
     return NextResponse.json(
       { error: "location_name is required" },
       { status: 400 }
     );
   }
-  if (
-    typeof available_minutes !== "number" ||
-    available_minutes <= 0 ||
-    available_minutes > 1440
-  ) {
+  if (!available_minutes) {
     return NextResponse.json(
-      { error: "available_minutes must be a positive number ≤ 1440 (24h)" },
+      { error: "available_minutes must be a positive integer ≤ 1440 (24h)" },
       { status: 400 }
     );
+  }
+
+  const supabase = createServerClient();
+  const authenticatedProfileId = await getAuthenticatedProfileId(req, supabase);
+  if (!authenticatedProfileId) {
+    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+  }
+  if (authenticatedProfileId !== profile_id) {
+    return NextResponse.json({ error: "Forbidden profile" }, { status: 403 });
   }
 
   // Compute available_until server-side — clients never supply this (Rule 6 spirit)
@@ -123,23 +137,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     Date.now() + available_minutes * 60 * 1000
   ).toISOString();
 
-  const supabase = createServerClient();
-
   const { data: beacon, error } = await supabase
     .from("beacons")
     .insert({
       profile_id,
-      location_name: location_name.trim(),
+      location_name,
       available_until,
     })
     .select("id, profile_id, location_name, available_until, created_at")
     .single();
 
   if (error) {
-    return NextResponse.json(
-      { error: `Failed to create beacon: ${error.message}` },
-      { status: 500 }
-    );
+    console.error("Failed to create beacon", error);
+    return NextResponse.json({ error: "Failed to create beacon" }, { status: 500 });
   }
 
   return NextResponse.json({ beacon }, { status: 201 });

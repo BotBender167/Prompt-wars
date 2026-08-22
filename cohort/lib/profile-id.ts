@@ -1,12 +1,9 @@
 /**
  * Local identity for the signed-out prototype.
  *
- * There is no auth yet, so the profile row created by PUT /api/profile is
- * remembered in localStorage and sent explicitly by the callers that need it
- * (beacons, message drafting, sync).
- *
- * ponytail: browser-trusted identity — anyone can put any id here. Replace the
- * whole module with a Supabase auth session before this is public.
+ * The id is remembered in localStorage so the UI can reload the right profile
+ * and send it to profile-scoped routes. It is not proof of ownership: writes
+ * are authorised by the server-managed HttpOnly profile session cookie.
  */
 const KEY = "parivar.profile_id";
 

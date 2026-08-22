@@ -67,6 +67,24 @@ describe("profile session tokens", () => {
     );
   });
 
+  test("returns null when the session record cannot be created", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const client = {
+      from: vi.fn(() => ({
+        insert: vi.fn().mockResolvedValue({ error: { message: "database unavailable" } }),
+      })),
+    };
+
+    await expect(
+      createProfileSession(
+        client as never,
+        "550e8400-e29b-41d4-a716-446655440000"
+      )
+    ).resolves.toBeNull();
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
   test("resolves a valid cookie to its server-owned profile", async () => {
     const token = createSessionToken();
     const maybeSingle = vi.fn().mockResolvedValue({
@@ -98,6 +116,29 @@ describe("profile session tokens", () => {
 
     await expect(getAuthenticatedProfileId(request, client as never)).resolves.toBeNull();
     expect(client.from).not.toHaveBeenCalled();
+  });
+
+  test("returns null when the session lookup fails", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const token = createSessionToken();
+    const query = {
+      select: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnThis(),
+      gt: vi.fn().mockReturnThis(),
+      maybeSingle: vi.fn().mockResolvedValue({
+        data: null,
+        error: { message: "database unavailable" },
+      }),
+    };
+    const request = new NextRequest("https://example.com/api/profile", {
+      headers: { cookie: `parivar_session=${token}` },
+    });
+
+    await expect(
+      getAuthenticatedProfileId(request, { from: vi.fn(() => query) } as never)
+    ).resolves.toBeNull();
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
   });
 
   test("sets the hardened session cookie on a response", () => {

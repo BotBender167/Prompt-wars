@@ -28,6 +28,14 @@ describe("same-origin request protection", () => {
       ).toBe(false);
     }
   );
+
+  test("rejects a malformed origin header", () => {
+    const request = new Request("https://example.com/api/profile", {
+      headers: { origin: "not-an-origin" },
+    });
+
+    expect(requestOriginIsAllowed(request)).toBe(false);
+  });
 });
 
 describe("client identification", () => {
@@ -43,6 +51,14 @@ describe("client identification", () => {
     expect(getClientIdentifier(new Request("https://example.com/api/profile"))).toBe(
       "unknown"
     );
+  });
+
+  test("falls back to the direct proxy address", () => {
+    const request = new Request("https://example.com/api/profile", {
+      headers: { "x-real-ip": "203.0.113.10" },
+    });
+
+    expect(getClientIdentifier(request)).toBe("203.0.113.10");
   });
 });
 
@@ -66,6 +82,23 @@ describe("bounded request limiting", () => {
   test("starts a fresh window after expiry", () => {
     checkRateLimit("key", 1, 1_000, 100);
     expect(checkRateLimit("key", 1, 1_000, 1_100).allowed).toBe(true);
+  });
+
+  test("evicts the oldest active key when the bounded store is full", () => {
+    for (let index = 0; index < 10_000; index += 1) {
+      checkRateLimit(`key-${index}`, 1, 60_000, 0);
+    }
+    checkRateLimit("overflow", 1, 60_000, 0);
+
+    expect(checkRateLimit("key-0", 1, 60_000, 1).allowed).toBe(true);
+  });
+
+  test("removes expired keys before evicting active ones", () => {
+    for (let index = 0; index < 10_000; index += 1) {
+      checkRateLimit(`expired-${index}`, 1, 1, 0);
+    }
+
+    expect(checkRateLimit("fresh", 1, 1_000, 2).allowed).toBe(true);
   });
 });
 

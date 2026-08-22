@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { INSTITUTION_NAME } from "@/lib/campus";
 import { sanitizeForFilter } from "@/lib/search";
+import { guardApiRequest } from "@/lib/api-security";
+import { normalizeInterests, nullableText } from "@/lib/validation";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -73,6 +75,9 @@ function recencyBucket(commits_90d: number | null | undefined): number {
 // ── Route handler ──────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const guarded = guardApiRequest(req, { limit: 30 });
+  if (guarded) return guarded;
+
   let body: DiscoverRequestBody;
   try {
     body = (await req.json()) as DiscoverRequestBody;
@@ -81,12 +86,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const query = sanitizeForFilter((body.query ?? "").trim());
-  const department = (body.department ?? "").trim().slice(0, 120);
-  const queryInterests: string[] = Array.isArray(body.interests)
-    ? body.interests
-        .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
-        .slice(0, 40)
-    : [];
+  const department = nullableText(body.department, 120) ?? "";
+  const queryInterests = normalizeInterests(body.interests, 40, 80);
 
   const supabase = createServerClient();
 
@@ -101,10 +102,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .in("domains.name", queryInterests);
 
     if (interestError) {
-      return NextResponse.json(
-        { error: `Database error: ${interestError.message}` },
-        { status: 500 }
-      );
+      console.error("Failed to search profile interests", interestError);
+      return NextResponse.json({ error: "Search failed" }, { status: 500 });
     }
 
     interestProfileIds = Array.from(
@@ -148,10 +147,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const { data: profiles, error: dbError } = await dbQuery;
 
   if (dbError) {
-    return NextResponse.json(
-      { error: `Database error: ${dbError.message}` },
-      { status: 500 }
-    );
+    console.error("Failed to search profiles", dbError);
+    return NextResponse.json({ error: "Search failed" }, { status: 500 });
   }
 
   if (!profiles || profiles.length === 0) {
